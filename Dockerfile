@@ -9,4 +9,4 @@ COPY static static
 USER app
 EXPOSE 8000
 # 1 воркер: ограничитель попыток входа хранится в памяти процесса
-CMD ["gunicorn", "-w", "1", "--threads", "4", "-b", "0.0.0.0:8000", "--timeout", "300", "--access-logfile", "-", "app:app"]
+CMD ["gunicorn", "-w", "1", "--threads", "8", "-b", "0.0.0.0:8000", "--timeout", "300", "--access-logfile", "-", "app:app"]

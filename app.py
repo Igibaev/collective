@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import sqlite3
 import time
 import uuid
@@ -57,7 +58,12 @@ SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "")
 PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
 MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "50"))
-MAX_TOTAL_MB = int(os.environ.get("MAX_TOTAL_MB", "95"))
+MAX_TOTAL_MB = int(os.environ.get("MAX_TOTAL_MB", "95"))   # предел одного HTTP-запроса (Cloudflare режет >100 МБ)
+# Загрузка частями (JS): каждый кусок — отдельный небольшой запрос, поэтому лимит Cloudflare не мешает
+BIG_FILE_MB = int(os.environ.get("BIG_FILE_MB", "1024"))    # максимум на один файл
+CLAIM_MAX_MB = int(os.environ.get("CLAIM_MAX_MB", "3072"))  # максимум файлов на одну анкету
+CHUNK_MB = 8
+TMP_DIR = DATA_DIR / "tmp"
 
 ALLOWED_EXT = {
     "pdf", "jpg", "jpeg", "png", "heic", "heif", "webp",
@@ -155,6 +161,8 @@ def close_db(_exc):
 def init_storage():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    cleanup_tmp()
     try:
         os.chmod(DATA_DIR, 0o700)
     except OSError:
@@ -162,6 +170,16 @@ def init_storage():
     conn = sqlite3.connect(DB_PATH)
     conn.executescript(SCHEMA)
     conn.close()
+
+
+def cleanup_tmp(max_age_h=48):
+    cutoff = time.time() - max_age_h * 3600
+    for p in TMP_DIR.glob("*"):
+        try:
+            if p.stat().st_mtime < cutoff:
+                p.unlink()
+        except OSError:
+            pass
 
 
 def now_iso():
@@ -372,6 +390,8 @@ def form():
                     continue
                 uploads.append((cat, name, ext, fs))
 
+        chunked = session_uploads()
+
         if errors:
             audit(f"анкета не принята ({session.get('phone') or '-'}): " + " | ".join(errors)[:500])
         if not errors:
@@ -396,6 +416,15 @@ def form():
             claim_id = cur.lastrowid
             cdir = UPLOAD_DIR / str(claim_id)
             cdir.mkdir(parents=True, exist_ok=True)
+            for token, m in chunked:
+                stored = f"{m['cat']}_{uuid.uuid4().hex}.{m['ext']}"
+                os.replace(tmp_part(token), cdir / stored)
+                (TMP_DIR / f"{token}.json").unlink(missing_ok=True)
+                db().execute(
+                    "INSERT INTO files(claim_id, category, original_name, stored_name, size) VALUES (?,?,?,?,?)",
+                    (claim_id, m["cat"], m["name"], stored, m["size"]),
+                )
+            session["uploads"] = []
             for cat, name, ext, fs in uploads:
                 stored = f"{cat}_{uuid.uuid4().hex}.{ext}"
                 path = cdir / stored
@@ -419,8 +448,107 @@ def form():
         organizer=ORGANIZER, contact=ORGANIZER_CONTACT, deadline=DEADLINE,
         locked_phone=session.get("phone") if ALLOWED_PHONES else None,
         consent=CONSENT_TEXT.format(org=ORGANIZER), max_mb=MAX_FILE_MB, total_mb=MAX_TOTAL_MB,
+        big_mb=BIG_FILE_MB, claim_mb=CLAIM_MAX_MB, pending=session_uploads(),
         exts=", ".join(sorted(ALLOWED_EXT)),
     )
+
+
+# ---------------------------------------------------------------- загрузка частями
+TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def upload_guard():
+    if GATED and not session.get("access_ok"):
+        abort(403, "Сначала войдите в форму.")
+    sent = request.headers.get("X-CSRF-Token", "")
+    if not sent or not hmac.compare_digest(sent, session.get("_csrf", "")):
+        abort(400, "Сессия устарела. Обновите страницу.")
+
+
+def tmp_meta(token):
+    if not TOKEN_RE.match(token or "") or token not in session.get("uploads", []):
+        return None
+    mp = TMP_DIR / f"{token}.json"
+    if not mp.is_file():
+        return None
+    return json.loads(mp.read_text())
+
+
+def tmp_part(token):
+    return TMP_DIR / f"{token}.part"
+
+
+def session_uploads():
+    """Полностью загруженные файлы текущей сессии: [(token, meta)]."""
+    out = []
+    for t in session.get("uploads", []):
+        m = tmp_meta(t)
+        if m and tmp_part(t).is_file() and tmp_part(t).stat().st_size == m["size"]:
+            out.append((t, m))
+    return out
+
+
+@app.route("/upload/start", methods=["POST"])
+def upload_start():
+    upload_guard()
+    d = request.get_json(silent=True) or {}
+    cat, name = d.get("cat", ""), str(d.get("name", ""))[:200]
+    try:
+        size = int(d.get("size", -1))
+    except (TypeError, ValueError):
+        size = -1
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if cat not in CAT_LABEL:
+        return {"error": "Неизвестный раздел."}, 400
+    if ext not in ALLOWED_EXT:
+        return {"error": f"Формат .{ext or '?'} не принимается."}, 400
+    if size <= 0 or size > BIG_FILE_MB * 1024 * 1024:
+        return {"error": f"Файл больше {BIG_FILE_MB} МБ. Сделайте экспорт без медиа или разделите файл."}, 400
+    used = sum(m["size"] for _, m in session_uploads())
+    if used + size > CLAIM_MAX_MB * 1024 * 1024:
+        return {"error": f"На одну анкету можно загрузить до {CLAIM_MAX_MB} МБ."}, 400
+    if shutil.disk_usage(DATA_DIR).free < size + 2 * 1024 ** 3:
+        app.logger.error("Мало места на диске для загрузки %s байт", size)
+        return {"error": "На сервере закончилось место. Напишите организатору."}, 507
+    if len(session.get("uploads", [])) >= 200:
+        return {"error": "Слишком много файлов в одной анкете."}, 400
+    token = uuid.uuid4().hex
+    (TMP_DIR / f"{token}.json").write_text(json.dumps({"cat": cat, "name": name, "ext": ext, "size": size}))
+    tmp_part(token).touch()
+    session["uploads"] = session.get("uploads", []) + [token]
+    return {"token": token, "chunk": CHUNK_MB * 1024 * 1024}
+
+
+@app.route("/upload/chunk/<token>", methods=["POST"])
+def upload_chunk(token):
+    upload_guard()
+    m = tmp_meta(token)
+    if not m:
+        return {"error": "Загрузка не найдена, выберите файл ещё раз."}, 404
+    part = tmp_part(token)
+    have = part.stat().st_size
+    try:
+        offset = int(request.args.get("offset", "-1"))
+    except ValueError:
+        offset = -1
+    if offset != have:
+        return {"received": have}, 409
+    data = request.get_data(cache=False)
+    if len(data) > CHUNK_MB * 1024 * 1024 or have + len(data) > m["size"]:
+        return {"error": "Неверный кусок файла."}, 400
+    with open(part, "ab") as fh:
+        fh.write(data)
+    return {"received": have + len(data), "done": have + len(data) == m["size"]}
+
+
+@app.route("/upload/delete/<token>", methods=["POST"])
+def upload_delete(token):
+    upload_guard()
+    if tmp_meta(token):
+        for p in (tmp_part(token), TMP_DIR / f"{token}.json"):
+            p.unlink(missing_ok=True)
+        session["uploads"] = [t for t in session.get("uploads", []) if t != token]
+    return {"ok": True}
 
 
 @app.route("/access", methods=["GET", "POST"])
@@ -451,7 +579,7 @@ def access():
 
 @app.route("/whatsapp")
 def whatsapp_help():
-    return render_template("whatsapp.html", max_mb=MAX_FILE_MB, contact=ORGANIZER_CONTACT)
+    return render_template("whatsapp.html", max_mb=BIG_FILE_MB, contact=ORGANIZER_CONTACT)
 
 
 @app.route("/thanks")

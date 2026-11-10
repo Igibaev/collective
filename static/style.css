@@ -41,3 +41,5 @@ svg.ph{display:block;width:100%;max-width:220px;margin:0 auto}
 .t-head{fill:#fff;font-size:12px;font-weight:600}.t-big{font-size:20px}.t-row{fill:var(--fg);font-size:11px}.t-small{fill:var(--muted);font-size:10px}.t-acc{fill:var(--acc);font-weight:600}
 .hl{fill:none;stroke:#e5484d;stroke-width:3}
 @media (prefers-color-scheme:dark){.f-me{fill:#1f4a33}.f-frame{fill:#0b0d10}}
+.upl{margin:6px 0 14px}.flist{list-style:none;padding:0;margin:4px 0 0}.flist li{display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;padding:6px 8px;border:1px solid var(--line);border-radius:8px;margin:4px 0;font-size:.9rem;background:var(--bg)}
+.flist .fn{word-break:break-all;flex:1 1 160px}.flist .fs{color:var(--muted)}.flist .st.ok{color:#2e7d32}.flist .st.bad{color:var(--err)}

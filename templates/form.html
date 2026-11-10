@@ -10,7 +10,7 @@
 
 {% if errors %}<div class="err"><b>Проверьте форму:</b><ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
 
-<form method="post" enctype="multipart/form-data" autocomplete="on">
+<form method="post" enctype="multipart/form-data" autocomplete="on" id="claimform">
 <input type="hidden" name="_csrf" value="{{ csrf_token() }}">
 <div class="hp" aria-hidden="true"><label>Сайт <input name="website" tabindex="-1" autocomplete="off"></label></div>
 
@@ -72,11 +72,15 @@
 </fieldset>
 
 <fieldset><legend>4. Документы</legend>
-<p class="hint">Форматы: {{ exts }}. До {{ max_mb }} МБ на файл, всего до {{ total_mb }} МБ. Можно выбрать несколько файлов сразу. </p>
+<p class="hint">Форматы: {{ exts }}. Можно выбрать несколько файлов сразу. Файлы загружаются сразу после выбора, по частям: до {{ big_mb }} МБ на файл. Дождитесь, пока у всех файлов появится «✓ загружен», и только потом отправляйте форму.</p>
+<noscript><p class="err">В браузере отключён JavaScript: файлы уйдут вместе с формой, не больше {{ total_mb }} МБ всего.</p></noscript>
 <p class="note"><b>Переписку из WhatsApp</b> лучше выгрузить целиком, а не только скриншотами. <a href="{{ url_for('whatsapp_help') }}" target="_blank" rel="noopener">Пошаговая инструкция с картинками для Android и iPhone</a> (откроется в новой вкладке, заполненная форма не пропадёт).</p>
 <p class="hint">Платили наличными без чека? Это не мешает подать анкету. Приложите расписку, если она есть, а в описании укажите, где и кому передали деньги и кто при этом был (свидетели). Подойдут и сообщения, где ИП подтверждает, что получил оплату.</p>
 {% for key, label, req in cats %}
+<div class="upl" data-cat="{{ key }}">
 <label>{{ label }}{% if req %} *{% endif %}<input type="file" name="files_{{ key }}" multiple {% if req %}required{% endif %}></label>
+<ul class="flist">{% for t, m in pending if m.cat == key %}<li data-token="{{ t }}"><span class="fn">{{ m.name }}</span> <span class="fs">{{ (m.size/1048576)|round(1) }} МБ</span> <span class="st ok">✓ загружен</span> <button type="button" class="link rm">удалить</button></li>{% endfor %}</ul>
+</div>
 {% endfor %}
 </fieldset>
 
@@ -88,6 +92,8 @@
 <p class="hint">Заполнение формы не заменяет вашу личную подпись под заявлением в полицию и под иском: их нужно будет подписать отдельно.</p>
 </fieldset>
 
-<button type="submit">Отправить сведения</button>
+<p id="uplwarn" class="err" hidden></p>
+<button type="submit" id="submitbtn">Отправить сведения</button>
+<script src="{{ url_for('static', filename='upload.js') }}"></script>
 </form>
 {% endblock %}
