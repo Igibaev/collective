@@ -68,7 +68,7 @@ ALLOWED_EXT = {
 FILE_CATEGORIES = [
     ("id", "Удостоверение личности (копия, обе стороны)", False),
     ("contract", "Договор, заказ, счёт, эскиз с ценой и сроком", False),
-    ("payment", "Доказательства оплаты: чеки, выписка Kaspi/банка, расписки", True),
+    ("payment", "Доказательства оплаты: чеки, выписка Kaspi/банка, расписки (если есть)", False),
     ("chat", "Переписка: скриншоты, экспорт чата WhatsApp, голосовые", False),
     ("claim", "Претензия и ответ на неё (если были)", False),
     ("other", "Прочее (фото, акты, свидетели)", False),
@@ -367,8 +367,6 @@ def form():
                     errors.append(f"Файл «{name}»: формат .{ext or '?'} не принимается.")
                     continue
                 uploads.append((cat, name, ext, fs))
-        if not any(c == "payment" for c, *_ in uploads):
-            errors.append("Приложите хотя бы один документ об оплате (чек, выписку, перевод). Это главное доказательство.")
 
         if not errors:
             ref = "PM-" + datetime.now().strftime("%m%d") + "-" + secrets.token_hex(3).upper()
@@ -500,7 +498,8 @@ def admin_logout():
 @admin_required
 def admin_list():
     rows = db().execute(
-        "SELECT c.*, (SELECT COUNT(*) FROM files f WHERE f.claim_id=c.id) AS nfiles "
+        "SELECT c.*, (SELECT COUNT(*) FROM files f WHERE f.claim_id=c.id) AS nfiles, "
+        "(SELECT COUNT(*) FROM files f WHERE f.claim_id=c.id AND f.category='payment') AS npay "
         "FROM claims c ORDER BY c.id"
     ).fetchall()
     total_paid = sum(r["paid_amount"] or 0 for r in rows)

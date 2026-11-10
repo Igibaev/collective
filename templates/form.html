@@ -74,6 +74,7 @@
 <fieldset><legend>4. Документы</legend>
 <p class="hint">Форматы: {{ exts }}. До {{ max_mb }} МБ на файл, всего до {{ total_mb }} МБ. Можно выбрать несколько файлов сразу. </p>
 <p class="note"><b>Переписку из WhatsApp</b> лучше выгрузить целиком, а не только скриншотами. <a href="{{ url_for('whatsapp_help') }}" target="_blank" rel="noopener">Пошаговая инструкция с картинками для Android и iPhone</a> (откроется в новой вкладке, заполненная форма не пропадёт).</p>
+<p class="hint">Платили наличными без чека? Это не мешает подать анкету. Приложите расписку, если она есть, а в описании укажите, где и кому передали деньги и кто при этом был (свидетели). Подойдут и сообщения, где ИП подтверждает, что получил оплату.</p>
 {% for key, label, req in cats %}
 <label>{{ label }}{% if req %} *{% endif %}<input type="file" name="files_{{ key }}" multiple {% if req %}required{% endif %}></label>
 {% endfor %}

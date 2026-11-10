@@ -11,8 +11,8 @@
 <td>{{ loop.index }}</td><td><a href="{{ url_for('admin_claim', cid=r.id) }}">{{ r.ref }}</a></td>
 <td>{{ r.full_name }}</td><td>{{ r.iin }}</td><td>{{ r.phone }}</td>
 <td class="num">{{ r.paid_amount|tg }}</td><td class="num">{{ r.damage|tg }}</td>
-<td class="num">{{ r.nfiles }}</td><td>{{ r.status }}</td><td>{{ r.created_at }}</td></tr>
+<td class="num">{{ r.nfiles }}{% if not r.npay %} <span title="Нет документов об оплате">⚠</span>{% endif %}</td><td>{{ r.status }}</td><td>{{ r.created_at }}</td></tr>
 {% else %}<tr><td colspan="10">Пока нет анкет.</td></tr>{% endfor %}
 </table></div>
-<p class="hint">Строки, подсвеченные жёлтым, имеют повторяющийся ИИН: проверьте, не дубль ли это.</p>
+<p class="hint">⚠ — нет документов об оплате (наличные без чека): по таким анкетам нужны свидетели или переписка, где ИП подтверждает получение денег. Строки, подсвеченные жёлтым, имеют повторяющийся ИИН: проверьте, не дубль ли это.</p>
 {% endblock %}
