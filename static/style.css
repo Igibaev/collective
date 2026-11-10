@@ -29,3 +29,15 @@ dl.card{display:grid;grid-template-columns:180px 1fr;gap:4px 12px;background:var
 @media(max-width:640px){dl.card{grid-template-columns:1fr}}dt{color:var(--muted)}dd{margin:0}
 .story{white-space:pre-wrap;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px}
 details.danger{margin-top:24px;border:1px solid var(--err);border-radius:10px;padding:10px 14px}
+.tabs{display:flex;flex-wrap:wrap;gap:10px;margin:12px 0}.tabs a{padding:6px 12px;border:1px solid var(--line);border-radius:999px;text-decoration:none;background:var(--card)}
+.steps{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:18px}
+.step{margin:0;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;position:relative}
+.step .num{position:absolute;top:10px;left:10px;width:28px;height:28px;border-radius:50%;background:var(--acc);color:#fff;display:grid;place-items:center;font-weight:700}
+.step figcaption{margin-top:10px;font-size:.95rem}
+svg.ph{display:block;width:100%;max-width:220px;margin:0 auto}
+.f-frame{fill:#2b2f36}.f-screen{fill:var(--bg)}.f-head{fill:#3a6b5e}.f-av{fill:#cfd8d3}
+.f-me{fill:#d6efd9}.f-them{fill:var(--card);stroke:var(--line)}.f-row{fill:var(--card);stroke:var(--line)}
+.f-menu{fill:var(--card);stroke:var(--line)}.f-dim{fill:#000;opacity:.35}
+.t-head{fill:#fff;font-size:12px;font-weight:600}.t-big{font-size:20px}.t-row{fill:var(--fg);font-size:11px}.t-small{fill:var(--muted);font-size:10px}.t-acc{fill:var(--acc);font-weight:600}
+.hl{fill:none;stroke:#e5484d;stroke-width:3}
+@media (prefers-color-scheme:dark){.f-me{fill:#1f4a33}.f-frame{fill:#0b0d10}}

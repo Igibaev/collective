@@ -49,8 +49,15 @@ ORGANIZER = os.environ.get("ORGANIZER_NAME", "[ФИО организатора]"
 ORGANIZER_CONTACT = os.environ.get("ORGANIZER_CONTACT", "[телефон / e-mail организатора]")
 DEADLINE = os.environ.get("DEADLINE", "")                 # например 30.11.2026
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"
-MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "25"))
-MAX_TOTAL_MB = int(os.environ.get("MAX_TOTAL_MB", "150"))
+# Уведомления на почту о новых анкетах (без персональных данных и файлов)
+SMTP_HOST = os.environ.get("SMTP_HOST", "")
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+SMTP_USER = os.environ.get("SMTP_USER", "")
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
+NOTIFY_EMAIL = os.environ.get("NOTIFY_EMAIL", "")
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "").rstrip("/")
+MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "50"))
+MAX_TOTAL_MB = int(os.environ.get("MAX_TOTAL_MB", "95"))
 
 ALLOWED_EXT = {
     "pdf", "jpg", "jpeg", "png", "heic", "heif", "webp",
@@ -272,6 +279,45 @@ CONSENT_TEXT = (
 )
 
 
+def notify_new_claim(ref, claim_id, damage, nfiles):
+    """Короткое письмо организатору. ФИО, ИИН и документы в письмо НЕ кладём."""
+    if not (SMTP_HOST and NOTIFY_EMAIL):
+        return
+
+    def send():
+        import smtplib
+        import ssl
+        from email.message import EmailMessage
+        msg = EmailMessage()
+        msg["Subject"] = f"Новая анкета {ref}"
+        msg["From"] = SMTP_USER or NOTIFY_EMAIL
+        msg["To"] = NOTIFY_EMAIL
+        link = f"{PUBLIC_URL}/admin/claim/{claim_id}" if PUBLIC_URL else f"/admin/claim/{claim_id}"
+        msg.set_content(
+            f"Поступила новая анкета {ref}.\n"
+            f"Сумма ущерба: {tg(damage)}\nФайлов: {nfiles}\n\n"
+            f"Открыть в админке: {link}\n\n"
+            "Персональные данные и документы в письмо не включаются, они хранятся только на сервере."
+        )
+        try:
+            if SMTP_PORT == 465:
+                with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ssl.create_default_context(), timeout=20) as srv:
+                    if SMTP_USER:
+                        srv.login(SMTP_USER, SMTP_PASSWORD)
+                    srv.send_message(msg)
+            else:
+                with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as srv:
+                    srv.starttls(context=ssl.create_default_context())
+                    if SMTP_USER:
+                        srv.login(SMTP_USER, SMTP_PASSWORD)
+                    srv.send_message(msg)
+        except Exception as exc:  # письмо не должно ломать приём анкеты
+            app.logger.error("Не удалось отправить уведомление %s: %s", ref, exc)
+
+    import threading
+    threading.Thread(target=send, daemon=True).start()
+
+
 # ---------------------------------------------------------------- публичная часть
 @app.route("/", methods=["GET", "POST"])
 def form():
@@ -359,6 +405,8 @@ def form():
                     (claim_id, cat, name[:200], stored, size),
                 )
             db().commit()
+            nfiles = db().execute("SELECT COUNT(*) FROM files WHERE claim_id=?", (claim_id,)).fetchone()[0]
+            notify_new_claim(ref, claim_id, damage, nfiles)
             return redirect(url_for("thanks", ref=ref))
 
     return render_template(
@@ -392,6 +440,11 @@ def access():
                "или напишите организатору." if not phone_ok else "Неверный код. Уточните его у организатора.")
     return render_template("access.html", err=err, contact=ORGANIZER_CONTACT,
                            need_code=bool(ACCESS_CODE), need_phone=bool(ALLOWED_PHONES))
+
+
+@app.route("/whatsapp")
+def whatsapp_help():
+    return render_template("whatsapp.html", max_mb=MAX_FILE_MB, contact=ORGANIZER_CONTACT)
 
 
 @app.route("/thanks")
