@@ -171,6 +171,9 @@ def now_iso():
 def client_ip():
     # за обратным прокси (Caddy/nginx) берём первый адрес из X-Forwarded-For
     if os.environ.get("BEHIND_PROXY") == "1":
+        cf = request.headers.get("CF-Connecting-IP", "")  # Cloudflare Tunnel
+        if cf:
+            return cf.strip()
         xff = request.headers.get("X-Forwarded-For", "")
         if xff:
             return xff.split(",")[0].strip()
@@ -327,7 +330,8 @@ def form():
     errors, data = [], {}
     if request.method == "POST":
         check_csrf()
-        if rate_limited(("form", client_ip()), 5, 3600):
+        if rate_limited(("form", client_ip()), 30, 3600):
+            audit("отправка анкеты отклонена: слишком часто")
             abort(429, "Слишком много отправок. Попробуйте позже.")
         if request.form.get("website"):  # ловушка для ботов
             return redirect(url_for("thanks", ref="OK"))
@@ -368,6 +372,8 @@ def form():
                     continue
                 uploads.append((cat, name, ext, fs))
 
+        if errors:
+            audit(f"анкета не принята ({session.get('phone') or '-'}): " + " | ".join(errors)[:500])
         if not errors:
             ref = "PM-" + datetime.now().strftime("%m%d") + "-" + secrets.token_hex(3).upper()
             paid_v = paid or 0
@@ -404,6 +410,7 @@ def form():
                 )
             db().commit()
             nfiles = db().execute("SELECT COUNT(*) FROM files WHERE claim_id=?", (claim_id,)).fetchone()[0]
+            audit(f"анкета принята {ref} ({session.get('phone') or '-'}), файлов {nfiles}")
             notify_new_claim(ref, claim_id, damage, nfiles)
             return redirect(url_for("thanks", ref=ref))
 
@@ -423,12 +430,14 @@ def access():
     err = None
     if request.method == "POST":
         check_csrf()
-        if rate_limited(("access", client_ip()), 10, 600):
+        if rate_limited(("access", client_ip()), 30, 600):
+            audit("вход в форму заблокирован: слишком много попыток")
             abort(429, "Слишком много попыток. Подождите 10 минут.")
         code_ok = not ACCESS_CODE or hmac.compare_digest(request.form.get("code", "").strip(), ACCESS_CODE)
         phone = norm_phone(request.form.get("phone", ""))
         phone_ok = not ALLOWED_PHONES or phone in ALLOWED_PHONES
         if code_ok and phone_ok:
+            audit(f"вход в форму: телефон {phone or '-'}")
             session["access_ok"] = True
             if ALLOWED_PHONES:
                 session["phone"] = "+" + phone
@@ -452,6 +461,7 @@ def thanks():
 
 @app.errorhandler(413)
 def too_large(_e):
+    audit(f"анкета не принята: файлы больше {MAX_TOTAL_MB} МБ ({session.get('phone') or '-'})")
     return render_template("message.html", title="Файлы слишком большие",
                            text=f"Общий размер файлов больше {MAX_TOTAL_MB} МБ. Отправьте форму с меньшим "
                                 f"количеством файлов, остальное передайте организатору."), 413
