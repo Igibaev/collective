@@ -11,6 +11,7 @@
 ```bash
 cp .env.example .env
 nano .env          # задайте ADMIN_PASSWORD, SECRET_KEY, ORGANIZER_NAME, ORGANIZER_CONTACT
+mkdir -p data && sudo chown 10001:10001 data   # приложение в контейнере работает от uid 10001
 docker compose up -d --build
 ```
 
