@@ -1,10 +1,11 @@
 {% extends "base.html" %}
 {% block body %}
 <h1>Вход в форму</h1>
-<p>Введите код доступа, который вам прислал организатор.</p>
+<p>Форма доступна только участникам. {% if need_phone %}Введите номер телефона, на который вам пришла ссылка.{% endif %}{% if need_code %} Введите код, который прислал организатор.{% endif %}</p>
 {% if err %}<div class="err">{{ err }}</div>{% endif %}
 <form method="post"><input type="hidden" name="_csrf" value="{{ csrf_token() }}">
-<label>Код<input name="code" required autocomplete="off"></label>
+{% if need_phone %}<label>Телефон<input name="phone" type="tel" required placeholder="+7 7__ ___ __ __" autocomplete="tel"></label>{% endif %}
+{% if need_code %}<label>Код<input name="code" required autocomplete="off"></label>{% endif %}
 <button type="submit">Продолжить</button></form>
-<p class="hint">Нет кода? Напишите организатору: {{ contact }}.</p>
+<p class="hint">Не получается войти? Напишите организатору: {{ contact }}.</p>
 {% endblock %}

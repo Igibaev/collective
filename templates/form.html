@@ -21,7 +21,7 @@
 <label>Дата рождения<input name="birth_date" type="date" value="{{ data.birth_date }}"></label>
 </div>
 <div class="row">
-<label>Телефон (WhatsApp) *<input name="phone" required type="tel" maxlength="40" value="{{ data.phone }}"></label>
+{% if locked_phone %}<label>Телефон (WhatsApp)<input value="{{ locked_phone }}" disabled></label>{% else %}<label>Телефон (WhatsApp) *<input name="phone" required type="tel" maxlength="40" value="{{ data.phone }}"></label>{% endif %}
 <label>E-mail<input name="email" type="email" maxlength="200" value="{{ data.email }}"></label>
 </div>
 <label>Адрес проживания *<input name="address" required maxlength="300" value="{{ data.address }}"></label>

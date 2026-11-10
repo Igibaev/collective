@@ -29,6 +29,22 @@ UPLOAD_DIR = DATA_DIR / "uploads"
 DB_PATH = DATA_DIR / "claims.sqlite3"
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 ACCESS_CODE = os.environ.get("ACCESS_CODE", "")          # код доступа к форме (необязательно)
+
+
+def norm_phone(p):
+    """+7 (701) 234-56-78, 87012345678, 7012345678 -> 77012345678"""
+    d = re.sub(r"\D", "", p or "")
+    if len(d) == 11 and d[0] == "8":
+        d = "7" + d[1:]
+    elif len(d) == 10:
+        d = "7" + d
+    return d
+
+
+# Белый список телефонов, которым разрешено подавать анкеты (через запятую или точку с запятой).
+# Пусто = ограничения по телефону нет.
+ALLOWED_PHONES = {norm_phone(x) for x in re.split(r"[,;\n]+", os.environ.get("ALLOWED_PHONES", "")) if norm_phone(x)}
+GATED = bool(ACCESS_CODE or ALLOWED_PHONES)
 ORGANIZER = os.environ.get("ORGANIZER_NAME", "[ФИО организатора]")
 ORGANIZER_CONTACT = os.environ.get("ORGANIZER_CONTACT", "[телефон / e-mail организатора]")
 DEADLINE = os.environ.get("DEADLINE", "")                 # например 30.11.2026
@@ -259,7 +275,7 @@ CONSENT_TEXT = (
 # ---------------------------------------------------------------- публичная часть
 @app.route("/", methods=["GET", "POST"])
 def form():
-    if ACCESS_CODE and not session.get("access_ok"):
+    if GATED and not session.get("access_ok"):
         return redirect(url_for("access"))
 
     errors, data = [], {}
@@ -271,6 +287,8 @@ def form():
             return redirect(url_for("thanks", ref="OK"))
 
         f = {k: (request.form.get(k) or "").strip() for k in request.form.keys()}
+        if ALLOWED_PHONES:
+            f["phone"] = session.get("phone", "")  # телефон фиксируется на входе
         data = f
         req = {
             "full_name": "ФИО", "iin": "ИИН", "phone": "Телефон", "address": "Адрес",
@@ -346,6 +364,7 @@ def form():
     return render_template(
         "form.html", errors=errors, data=data, cats=FILE_CATEGORIES,
         organizer=ORGANIZER, contact=ORGANIZER_CONTACT, deadline=DEADLINE,
+        locked_phone=session.get("phone") if ALLOWED_PHONES else None,
         consent=CONSENT_TEXT.format(org=ORGANIZER), max_mb=MAX_FILE_MB, total_mb=MAX_TOTAL_MB,
         exts=", ".join(sorted(ALLOWED_EXT)),
     )
@@ -353,18 +372,26 @@ def form():
 
 @app.route("/access", methods=["GET", "POST"])
 def access():
-    if not ACCESS_CODE:
+    if not GATED:
         return redirect(url_for("form"))
     err = None
     if request.method == "POST":
         check_csrf()
         if rate_limited(("access", client_ip()), 10, 600):
             abort(429, "Слишком много попыток. Подождите 10 минут.")
-        if hmac.compare_digest(request.form.get("code", "").strip(), ACCESS_CODE):
+        code_ok = not ACCESS_CODE or hmac.compare_digest(request.form.get("code", "").strip(), ACCESS_CODE)
+        phone = norm_phone(request.form.get("phone", ""))
+        phone_ok = not ALLOWED_PHONES or phone in ALLOWED_PHONES
+        if code_ok and phone_ok:
             session["access_ok"] = True
+            if ALLOWED_PHONES:
+                session["phone"] = "+" + phone
             return redirect(url_for("form"))
-        err = "Неверный код. Уточните его у организатора."
-    return render_template("access.html", err=err, contact=ORGANIZER_CONTACT)
+        audit(f"отказ во входе в форму: телефон {phone or '-'}")
+        err = ("Этого номера нет в списке участников. Введите номер, на который вам пришла ссылка, "
+               "или напишите организатору." if not phone_ok else "Неверный код. Уточните его у организатора.")
+    return render_template("access.html", err=err, contact=ORGANIZER_CONTACT,
+                           need_code=bool(ACCESS_CODE), need_phone=bool(ALLOWED_PHONES))
 
 
 @app.route("/thanks")
