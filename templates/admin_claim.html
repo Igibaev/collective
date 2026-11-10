@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}{{ c.ref }}{% endblock %}
+{% block body %}
+{% include "_adminnav.html" %}
+<h1>{{ c.ref }}: {{ c.full_name }}</h1>
+<dl class="card">
+<dt>ИИН</dt><dd>{{ c.iin }}</dd><dt>Дата рождения</dt><dd>{{ c.birth_date or "—" }}</dd>
+<dt>Телефон</dt><dd>{{ c.phone }}</dd><dt>E-mail</dt><dd>{{ c.email or "—" }}</dd>
+<dt>Адрес</dt><dd>{{ c.address }}</dd>
+<dt>Дата заказа</dt><dd>{{ c.order_date or "—" }}</dd><dt>Обещанный срок</dt><dd>{{ c.promised_date or "—" }}</dd>
+<dt>Заказ</dt><dd>{{ c.item }}</dd>
+<dt>Цена по договору</dt><dd>{{ c.contract_price|tg }}</dd><dt>Оплачено</dt><dd>{{ c.paid_amount|tg }}</dd>
+<dt>Платежи</dt><dd>{{ c.payment_dates or "—" }} ({{ c.payment_method or "способ не указан" }})</dd>
+<dt>Получено</dt><dd>{{ c.received_value|tg }}: {{ c.received_desc or "—" }}</dd>
+<dt>Ущерб</dt><dd><b>{{ c.damage|tg }}</b></dd>
+<dt>Канал связи</dt><dd>{{ c.contact_channel or "—" }}, последний ответ: {{ c.last_contact or "—" }}</dd>
+<dt>Претензия</dt><dd>{{ c.claim_sent }}</dd><dt>Полиция</dt><dd>{{ c.police_filed }}</dd>
+<dt>Подана</dt><dd>{{ c.created_at }}, IP {{ c.ip }}</dd>
+</dl>
+<h2>Описание</h2><div class="story">{{ c.story }}</div>
+<h2>Файлы ({{ files|length }})</h2>
+<ul>{% for f in files %}<li>{{ cat_label.get(f.category, f.category) }}: <a href="{{ url_for('admin_file', fid=f.id) }}">{{ f.original_name }}</a> ({{ (f.size/1024)|round|int }} КБ)</li>{% else %}<li>Нет файлов</li>{% endfor %}</ul>
+<h2>Работа с анкетой</h2>
+<form method="post"><input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+<label>Статус<select name="status">{% for s in statuses %}<option {% if c.status == s %}selected{% endif %}>{{ s }}</option>{% endfor %}</select></label>
+<label>Заметка (видна только вам)<textarea name="admin_note" rows="4">{{ c.admin_note or "" }}</textarea></label>
+<button type="submit">Сохранить</button></form>
+<details class="danger"><summary>Удалить анкету и файлы (если человек отозвал согласие)</summary>
+<form method="post" action="{{ url_for('admin_delete', cid=c.id) }}"><input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+<label class="cb"><input type="checkbox" required> Понимаю, что удаление нельзя отменить</label>
+<button type="submit" class="red">Удалить навсегда</button></form></details>
+<h2>Текст согласия, принятый человеком</h2><div class="consent">{{ c.consent_text }}</div>
+{% endblock %}

@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Вход в форму</h1>
+<p>Введите код доступа, который вам прислал организатор.</p>
+{% if err %}<div class="err">{{ err }}</div>{% endif %}
+<form method="post"><input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+<label>Код<input name="code" required autocomplete="off"></label>
+<button type="submit">Продолжить</button></form>
+<p class="hint">Нет кода? Напишите организатору: {{ contact }}.</p>
+{% endblock %}

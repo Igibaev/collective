@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Анкеты{% endblock %}
+{% block body %}
+{% include "_adminnav.html" %}
+<h1>Анкеты: {{ rows|length }}</h1>
+<p>Оплачено всего: <b>{{ total_paid|tg }}</b>. Ущерб всего (оплачено минус полученное): <b>{{ total_damage|tg }}</b>.</p>
+<div class="tbl"><table>
+<tr><th>#</th><th>Номер</th><th>ФИО</th><th>ИИН</th><th>Телефон</th><th>Оплачено</th><th>Ущерб</th><th>Файлов</th><th>Статус</th><th>Подана</th></tr>
+{% for r in rows %}
+<tr{% if dup[r.iin] > 1 %} class="dup" title="Этот ИИН встречается несколько раз"{% endif %}>
+<td>{{ loop.index }}</td><td><a href="{{ url_for('admin_claim', cid=r.id) }}">{{ r.ref }}</a></td>
+<td>{{ r.full_name }}</td><td>{{ r.iin }}</td><td>{{ r.phone }}</td>
+<td class="num">{{ r.paid_amount|tg }}</td><td class="num">{{ r.damage|tg }}</td>
+<td class="num">{{ r.nfiles }}</td><td>{{ r.status }}</td><td>{{ r.created_at }}</td></tr>
+{% else %}<tr><td colspan="10">Пока нет анкет.</td></tr>{% endfor %}
+</table></div>
+<p class="hint">Строки, подсвеченные жёлтым, имеют повторяющийся ИИН: проверьте, не дубль ли это.</p>
+{% endblock %}

@@ -1,0 +1,7 @@
+<nav class="adm">
+<a href="{{ url_for('admin_list') }}">Все анкеты</a>
+<a href="{{ url_for('export_csv') }}">Скачать таблицу CSV</a>
+<a href="{{ url_for('export_zip') }}">Скачать всё ZIP</a>
+<a href="{{ url_for('admin_audit') }}">Журнал</a>
+<form method="post" action="{{ url_for('admin_logout') }}" class="inline"><input type="hidden" name="_csrf" value="{{ csrf_token() }}"><button class="link">Выйти</button></form>
+</nav>

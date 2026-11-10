@@ -1,0 +1,8 @@
+# Замените на свой домен. Caddy сам получит сертификат Let's Encrypt.
+claims.example.kz {
+    encode gzip
+    request_body {
+        max_size 160MB
+    }
+    reverse_proxy app:8000
+}

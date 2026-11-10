@@ -1,0 +1,29 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    ports:
+      # По умолчанию сайт доступен только с самого сервера.
+      # Для доступа из локальной сети замените на "8000:8000",
+      # для доступа из интернета используйте профиль https ниже.
+      - "127.0.0.1:8000:8000"
+
+  # HTTPS через Caddy: docker compose --profile https up -d
+  # Нужен домен, указывающий на ваш сервер, и открытые порты 80/443.
+  caddy:
+    image: caddy:2
+    profiles: ["https"]
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [app]
+
+volumes:
+  caddy_data:

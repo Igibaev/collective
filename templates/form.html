@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>Сбор сведений от клиентов ИП «Престиж мебель»</h1>
+<p class="lead">Если вы заказывали мебель у ИП «Престиж мебель» (Пахомов Данил), внесли оплату и не получили товар или деньги, заполните эту форму. Сведения нужны, чтобы подготовить общее заявление в полицию и иски о возврате денег.</p>
+<div class="note">
+  <b>Важно.</b> Оригиналы документов храните у себя, сюда загружайте фото или сканы.
+  Ваши данные видит только организатор: {{ organizer }} ({{ contact }}). Они не публикуются и передаются только в полицию, прокуратуру, суд и адвокату.
+  {% if deadline %}<br>Срок: до <b>{{ deadline }}</b>.{% endif %}
+</div>
+
+{% if errors %}<div class="err"><b>Проверьте форму:</b><ul>{% for e in errors %}<li>{{ e }}</li>{% endfor %}</ul></div>{% endif %}
+
+<form method="post" enctype="multipart/form-data" autocomplete="on">
+<input type="hidden" name="_csrf" value="{{ csrf_token() }}">
+<div class="hp" aria-hidden="true"><label>Сайт <input name="website" tabindex="-1" autocomplete="off"></label></div>
+
+<fieldset><legend>1. О вас</legend>
+<label>ФИО полностью *<input name="full_name" required maxlength="200" value="{{ data.full_name }}"></label>
+<div class="row">
+<label>ИИН *<input name="iin" required inputmode="numeric" pattern="\d{12}" maxlength="12" value="{{ data.iin }}"></label>
+<label>Дата рождения<input name="birth_date" type="date" value="{{ data.birth_date }}"></label>
+</div>
+<div class="row">
+<label>Телефон (WhatsApp) *<input name="phone" required type="tel" maxlength="40" value="{{ data.phone }}"></label>
+<label>E-mail<input name="email" type="email" maxlength="200" value="{{ data.email }}"></label>
+</div>
+<label>Адрес проживания *<input name="address" required maxlength="300" value="{{ data.address }}"></label>
+</fieldset>
+
+<fieldset><legend>2. Заказ и оплата</legend>
+<div class="row">
+<label>Дата заказа / договора<input name="order_date" type="date" value="{{ data.order_date }}"></label>
+<label>Обещанный срок поставки<input name="promised_date" type="date" value="{{ data.promised_date }}"></label>
+</div>
+<label>Что заказывали *<input name="item" required maxlength="500" placeholder="например: кухонный гарнитур 3,2 м, шкаф-купе" value="{{ data.item }}"></label>
+<div class="row">
+<label>Стоимость по договору, ₸<input name="contract_price" inputmode="decimal" value="{{ data.contract_price }}"></label>
+<label>Сколько всего оплатили, ₸ *<input name="paid_amount" required inputmode="decimal" value="{{ data.paid_amount }}"></label>
+</div>
+<div class="row">
+<label>Даты и суммы платежей<input name="payment_dates" maxlength="500" placeholder="05.03.2026 — 300 000; 20.03.2026 — 200 000" value="{{ data.payment_dates }}"></label>
+<label>Как платили
+<select name="payment_method">
+{% for o in ["", "Kaspi перевод", "Kaspi QR / Kaspi Pay", "перевод на карту другого банка", "наличными с распиской", "наличными без расписки", "безнал на счёт ИП", "несколько способов"] %}
+<option value="{{ o }}" {% if data.payment_method == o %}selected{% endif %}>{{ o or "выберите" }}</option>{% endfor %}
+</select></label>
+</div>
+<div class="row">
+<label>Стоимость того, что всё-таки получили, ₸<input name="received_value" inputmode="decimal" placeholder="0, если ничего" value="{{ data.received_value }}"></label>
+<label>Что именно получили<input name="received_desc" maxlength="500" placeholder="ничего / только каркас / часть фасадов" value="{{ data.received_desc }}"></label>
+</div>
+</fieldset>
+
+<fieldset><legend>3. Общение и обращения</legend>
+<div class="row">
+<label>Где общались с ИП
+<select name="contact_channel">
+{% for o in ["", "WhatsApp", "Instagram", "Telegram", "телефон", "лично в салоне", "несколько каналов"] %}
+<option value="{{ o }}" {% if data.contact_channel == o %}selected{% endif %}>{{ o or "выберите" }}</option>{% endfor %}
+</select></label>
+<label>Дата последнего ответа от ИП<input name="last_contact" type="date" value="{{ data.last_contact }}"></label>
+</div>
+<div class="row">
+<label>Письменная претензия
+<select name="claim_sent">{% for o in ["не отправлял(а)", "отправлял(а), ответа нет", "отправлял(а), есть ответ"] %}<option {% if data.claim_sent == o %}selected{% endif %}>{{ o }}</option>{% endfor %}</select></label>
+<label>Уже обращались в полицию
+<select name="police_filed">{% for o in ["нет", "да, есть талон/КУИ", "да, получил(а) отказ"] %}<option {% if data.police_filed == o %}selected{% endif %}>{{ o }}</option>{% endfor %}</select></label>
+</div>
+<label>Что произошло, своими словами *
+<textarea name="story" required rows="6" maxlength="8000" placeholder="Когда и где заказали, что обещали, сколько и когда заплатили, какие сроки переносились и под каким предлогом, когда перестали отвечать. Только факты и даты.">{{ data.story }}</textarea></label>
+<p class="hint">Пишите только факты, которые можете подтвердить: даты, суммы, что было сказано. Оценки и оскорбления не помогут делу и могут навредить.</p>
+</fieldset>
+
+<fieldset><legend>4. Документы</legend>
+<p class="hint">Форматы: {{ exts }}. До {{ max_mb }} МБ на файл, всего до {{ total_mb }} МБ. Можно выбрать несколько файлов сразу. Экспорт чата WhatsApp: чат → ⋮ → Ещё → Экспорт чата → «С медиафайлами» или «Без медиа».</p>
+{% for key, label, req in cats %}
+<label>{{ label }}{% if req %} *{% endif %}<input type="file" name="files_{{ key }}" multiple {% if req %}required{% endif %}></label>
+{% endfor %}
+</fieldset>
+
+<fieldset><legend>5. Согласия</legend>
+<div class="consent">{{ consent }}</div>
+<label class="cb"><input type="checkbox" name="consent_pd" value="1" required> Даю согласие на сбор и обработку моих персональных данных на условиях выше *</label>
+<label class="cb"><input type="checkbox" name="consent_share" value="1" required> Согласен(на) на передачу данных и документов в полицию, прокуратуру, суд и адвокату *</label>
+<label class="cb"><input type="checkbox" name="confirm_truth" value="1" required> Подтверждаю, что сведения достоверны, а документы не изменены *</label>
+<p class="hint">Заполнение формы не заменяет вашу личную подпись под заявлением в полицию и под иском: их нужно будет подписать отдельно.</p>
+</fieldset>
+
+<button type="submit">Отправить сведения</button>
+</form>
+{% endblock %}

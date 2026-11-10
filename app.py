@@ -1,0 +1,584 @@
+"""
+Сбор сведений от клиентов ИП «Престиж мебель» для подготовки
+коллективного заявления в полицию и исков о возврате денег.
+
+Одна зависимость: Flask. Данные: SQLite + папка с файлами в DATA_DIR.
+"""
+import csv
+import hmac
+import io
+import json
+import os
+import re
+import secrets
+import sqlite3
+import time
+import uuid
+import zipfile
+from collections import defaultdict, deque
+from datetime import datetime, timezone
+from functools import wraps
+from pathlib import Path
+
+from flask import (Flask, Response, abort, flash, g, redirect, render_template,
+                   request, send_file, session, url_for)
+
+# ---------------------------------------------------------------- настройки
+DATA_DIR = Path(os.environ.get("DATA_DIR", "./data")).resolve()
+UPLOAD_DIR = DATA_DIR / "uploads"
+DB_PATH = DATA_DIR / "claims.sqlite3"
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+ACCESS_CODE = os.environ.get("ACCESS_CODE", "")          # код доступа к форме (необязательно)
+ORGANIZER = os.environ.get("ORGANIZER_NAME", "[ФИО организатора]")
+ORGANIZER_CONTACT = os.environ.get("ORGANIZER_CONTACT", "[телефон / e-mail организатора]")
+DEADLINE = os.environ.get("DEADLINE", "")                 # например 30.11.2026
+COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "0") == "1"
+MAX_FILE_MB = int(os.environ.get("MAX_FILE_MB", "25"))
+MAX_TOTAL_MB = int(os.environ.get("MAX_TOTAL_MB", "150"))
+
+ALLOWED_EXT = {
+    "pdf", "jpg", "jpeg", "png", "heic", "heif", "webp",
+    "doc", "docx", "xls", "xlsx", "txt", "rtf",
+    "mp3", "ogg", "opus", "m4a", "wav", "aac", "mp4", "mov",
+    "zip",
+}
+FILE_CATEGORIES = [
+    ("id", "Удостоверение личности (копия, обе стороны)", False),
+    ("contract", "Договор, заказ, счёт, эскиз с ценой и сроком", False),
+    ("payment", "Доказательства оплаты: чеки, выписка Kaspi/банка, расписки", True),
+    ("chat", "Переписка: скриншоты, экспорт чата WhatsApp, голосовые", False),
+    ("claim", "Претензия и ответ на неё (если были)", False),
+    ("other", "Прочее (фото, акты, свидетели)", False),
+]
+CAT_LABEL = {k: v for k, v, _ in FILE_CATEGORIES}
+
+app = Flask(__name__)
+app.config.update(
+    SECRET_KEY=os.environ.get("SECRET_KEY") or secrets.token_hex(32),
+    MAX_CONTENT_LENGTH=MAX_TOTAL_MB * 1024 * 1024,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Strict",
+    SESSION_COOKIE_SECURE=COOKIE_SECURE,
+    PERMANENT_SESSION_LIFETIME=60 * 60 * 4,
+)
+
+
+# ---------------------------------------------------------------- база
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS claims (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL,
+    ip TEXT,
+    full_name TEXT NOT NULL,
+    iin TEXT NOT NULL,
+    birth_date TEXT,
+    phone TEXT NOT NULL,
+    email TEXT,
+    address TEXT NOT NULL,
+    order_date TEXT,
+    item TEXT NOT NULL,
+    contract_price REAL,
+    paid_amount REAL NOT NULL,
+    payment_dates TEXT,
+    payment_method TEXT,
+    promised_date TEXT,
+    received_value REAL DEFAULT 0,
+    received_desc TEXT,
+    damage REAL,
+    contact_channel TEXT,
+    last_contact TEXT,
+    claim_sent TEXT,
+    police_filed TEXT,
+    story TEXT NOT NULL,
+    consent_pd INTEGER NOT NULL,
+    consent_share INTEGER NOT NULL,
+    consent_text TEXT NOT NULL,
+    status TEXT DEFAULT 'новая',
+    admin_note TEXT
+);
+CREATE TABLE IF NOT EXISTS files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    claim_id INTEGER NOT NULL REFERENCES claims(id) ON DELETE CASCADE,
+    category TEXT NOT NULL,
+    original_name TEXT NOT NULL,
+    stored_name TEXT NOT NULL,
+    size INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at TEXT NOT NULL,
+    ip TEXT,
+    action TEXT NOT NULL
+);
+"""
+
+
+def db():
+    if "db" not in g:
+        g.db = sqlite3.connect(DB_PATH)
+        g.db.row_factory = sqlite3.Row
+        g.db.execute("PRAGMA foreign_keys = ON")
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(_exc):
+    conn = g.pop("db", None)
+    if conn is not None:
+        conn.close()
+
+
+def init_storage():
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(DATA_DIR, 0o700)
+    except OSError:
+        pass
+    conn = sqlite3.connect(DB_PATH)
+    conn.executescript(SCHEMA)
+    conn.close()
+
+
+def now_iso():
+    return datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def client_ip():
+    # за обратным прокси (Caddy/nginx) берём первый адрес из X-Forwarded-For
+    if os.environ.get("BEHIND_PROXY") == "1":
+        xff = request.headers.get("X-Forwarded-For", "")
+        if xff:
+            return xff.split(",")[0].strip()
+    return request.remote_addr or ""
+
+
+def audit(action):
+    db().execute("INSERT INTO audit(at, ip, action) VALUES (?,?,?)", (now_iso(), client_ip(), action))
+    db().commit()
+
+
+# ---------------------------------------------------------------- защита
+_hits = defaultdict(deque)
+
+
+def rate_limited(key, limit, window):
+    q = _hits[key]
+    t = time.time()
+    while q and q[0] < t - window:
+        q.popleft()
+    if len(q) >= limit:
+        return True
+    q.append(t)
+    return False
+
+
+def csrf_token():
+    if "_csrf" not in session:
+        session["_csrf"] = secrets.token_urlsafe(32)
+    return session["_csrf"]
+
+
+app.jinja_env.globals["csrf_token"] = csrf_token
+
+
+def check_csrf():
+    sent = request.form.get("_csrf", "")
+    if not sent or not hmac.compare_digest(sent, session.get("_csrf", "")):
+        abort(400, "Сессия устарела. Обновите страницу и отправьте форму ещё раз.")
+
+
+@app.after_request
+def security_headers(resp):
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow"
+    resp.headers["Content-Security-Policy"] = (
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self'; frame-ancestors 'none'; form-action 'self'"
+    )
+    if request.path.startswith("/admin"):
+        resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.route("/robots.txt")
+def robots():
+    return Response("User-agent: *\nDisallow: /\n", mimetype="text/plain")
+
+
+def admin_required(fn):
+    @wraps(fn)
+    def wrapper(*a, **kw):
+        if not session.get("admin"):
+            return redirect(url_for("admin_login", next=request.path))
+        return fn(*a, **kw)
+    return wrapper
+
+
+# ---------------------------------------------------------------- проверки
+def valid_iin(iin: str) -> bool:
+    """Контрольная сумма ИИН РК (12 цифр, 12-я — контрольная)."""
+    if not re.fullmatch(r"\d{12}", iin):
+        return False
+    d = [int(c) for c in iin]
+    w1 = list(range(1, 12))
+    w2 = [3, 4, 5, 6, 7, 8, 9, 10, 11, 1, 2]
+    c = sum(a * b for a, b in zip(d[:11], w1)) % 11
+    if c == 10:
+        c = sum(a * b for a, b in zip(d[:11], w2)) % 11
+        if c == 10:
+            return False
+    return c == d[11]
+
+
+def money(v):
+    v = (v or "").replace(" ", "").replace(" ", "").replace(",", ".")
+    if not v:
+        return None
+    try:
+        x = float(v)
+    except ValueError:
+        return "bad"
+    return x if 0 <= x < 1e11 else "bad"
+
+
+CONSENT_TEXT = (
+    "Я даю согласие {org} на сбор, обработку и хранение моих персональных данных "
+    "(ФИО, ИИН, дата рождения, контакты, адрес, сведения о платежах, копии документов и переписки) "
+    "в соответствии с Законом РК «О персональных данных и их защите» с целью подготовки и подачи "
+    "заявления в правоохранительные органы, исков в суд, обращений в госорганы по спору с "
+    "ИП «Престиж мебель», а также на передачу этих данных в полицию, прокуратуру, суд и адвокату, "
+    "представляющему пострадавших. Согласие действует до завершения разбирательства и может быть "
+    "отозвано мной письменно."
+)
+
+
+# ---------------------------------------------------------------- публичная часть
+@app.route("/", methods=["GET", "POST"])
+def form():
+    if ACCESS_CODE and not session.get("access_ok"):
+        return redirect(url_for("access"))
+
+    errors, data = [], {}
+    if request.method == "POST":
+        check_csrf()
+        if rate_limited(("form", client_ip()), 5, 3600):
+            abort(429, "Слишком много отправок. Попробуйте позже.")
+        if request.form.get("website"):  # ловушка для ботов
+            return redirect(url_for("thanks", ref="OK"))
+
+        f = {k: (request.form.get(k) or "").strip() for k in request.form.keys()}
+        data = f
+        req = {
+            "full_name": "ФИО", "iin": "ИИН", "phone": "Телефон", "address": "Адрес",
+            "item": "Что заказывали", "paid_amount": "Сколько оплачено", "story": "Описание",
+        }
+        for k, label in req.items():
+            if not f.get(k):
+                errors.append(f"Заполните поле «{label}».")
+        if f.get("iin") and not valid_iin(f["iin"]):
+            errors.append("ИИН должен состоять из 12 цифр и быть корректным. Проверьте его по удостоверению.")
+        price, paid, recv = money(f.get("contract_price")), money(f.get("paid_amount")), money(f.get("received_value"))
+        for val, label in ((price, "Стоимость по договору"), (paid, "Сколько оплачено"), (recv, "Стоимость полученного")):
+            if val == "bad":
+                errors.append(f"Поле «{label}» должно быть числом в тенге.")
+        if not request.form.get("consent_pd"):
+            errors.append("Без согласия на обработку персональных данных мы не можем принять сведения.")
+        if not request.form.get("consent_share"):
+            errors.append("Нужно согласие на передачу данных в полицию, суд и адвокату.")
+        if not request.form.get("confirm_truth"):
+            errors.append("Подтвердите, что сведения достоверны.")
+
+        uploads = []
+        for cat, label, _req in FILE_CATEGORIES:
+            for fs in request.files.getlist(f"files_{cat}"):
+                if not fs or not fs.filename:
+                    continue
+                name = fs.filename
+                ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+                if ext not in ALLOWED_EXT:
+                    errors.append(f"Файл «{name}»: формат .{ext or '?'} не принимается.")
+                    continue
+                uploads.append((cat, name, ext, fs))
+        if not any(c == "payment" for c, *_ in uploads):
+            errors.append("Приложите хотя бы один документ об оплате (чек, выписку, перевод). Это главное доказательство.")
+
+        if not errors:
+            ref = "PM-" + datetime.now().strftime("%m%d") + "-" + secrets.token_hex(3).upper()
+            paid_v = paid or 0
+            recv_v = recv if isinstance(recv, float) else 0
+            damage = max(paid_v - recv_v, 0)
+            consent = CONSENT_TEXT.format(org=ORGANIZER)
+            cur = db().execute(
+                """INSERT INTO claims(ref, created_at, ip, full_name, iin, birth_date, phone, email, address,
+                order_date, item, contract_price, paid_amount, payment_dates, payment_method, promised_date,
+                received_value, received_desc, damage, contact_channel, last_contact, claim_sent, police_filed,
+                story, consent_pd, consent_share, consent_text)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (ref, now_iso(), client_ip(), f["full_name"], f["iin"], f.get("birth_date"), f["phone"],
+                 f.get("email"), f["address"], f.get("order_date"), f["item"],
+                 price if isinstance(price, float) else None, paid_v, f.get("payment_dates"),
+                 f.get("payment_method"), f.get("promised_date"), recv_v, f.get("received_desc"), damage,
+                 f.get("contact_channel"), f.get("last_contact"), f.get("claim_sent"), f.get("police_filed"),
+                 f["story"], 1, 1, consent),
+            )
+            claim_id = cur.lastrowid
+            cdir = UPLOAD_DIR / str(claim_id)
+            cdir.mkdir(parents=True, exist_ok=True)
+            for cat, name, ext, fs in uploads:
+                stored = f"{cat}_{uuid.uuid4().hex}.{ext}"
+                path = cdir / stored
+                fs.save(path)
+                size = path.stat().st_size
+                if size > MAX_FILE_MB * 1024 * 1024:
+                    path.unlink()
+                    continue
+                db().execute(
+                    "INSERT INTO files(claim_id, category, original_name, stored_name, size) VALUES (?,?,?,?,?)",
+                    (claim_id, cat, name[:200], stored, size),
+                )
+            db().commit()
+            return redirect(url_for("thanks", ref=ref))
+
+    return render_template(
+        "form.html", errors=errors, data=data, cats=FILE_CATEGORIES,
+        organizer=ORGANIZER, contact=ORGANIZER_CONTACT, deadline=DEADLINE,
+        consent=CONSENT_TEXT.format(org=ORGANIZER), max_mb=MAX_FILE_MB, total_mb=MAX_TOTAL_MB,
+        exts=", ".join(sorted(ALLOWED_EXT)),
+    )
+
+
+@app.route("/access", methods=["GET", "POST"])
+def access():
+    if not ACCESS_CODE:
+        return redirect(url_for("form"))
+    err = None
+    if request.method == "POST":
+        check_csrf()
+        if rate_limited(("access", client_ip()), 10, 600):
+            abort(429, "Слишком много попыток. Подождите 10 минут.")
+        if hmac.compare_digest(request.form.get("code", "").strip(), ACCESS_CODE):
+            session["access_ok"] = True
+            return redirect(url_for("form"))
+        err = "Неверный код. Уточните его у организатора."
+    return render_template("access.html", err=err, contact=ORGANIZER_CONTACT)
+
+
+@app.route("/thanks")
+def thanks():
+    return render_template("thanks.html", ref=request.args.get("ref", ""), contact=ORGANIZER_CONTACT)
+
+
+@app.errorhandler(413)
+def too_large(_e):
+    return render_template("message.html", title="Файлы слишком большие",
+                           text=f"Общий размер файлов больше {MAX_TOTAL_MB} МБ. Отправьте форму с меньшим "
+                                f"количеством файлов, остальное передайте организатору."), 413
+
+
+@app.errorhandler(400)
+@app.errorhandler(429)
+def bad_req(e):
+    return render_template("message.html", title="Не получилось", text=e.description), e.code
+
+
+# ---------------------------------------------------------------- админка
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    err = None
+    if not ADMIN_PASSWORD or len(ADMIN_PASSWORD) < 12:
+        return render_template("message.html", title="Админка отключена",
+                               text="Задайте ADMIN_PASSWORD длиной не меньше 12 символов в файле .env и перезапустите."), 503
+    if request.method == "POST":
+        check_csrf()
+        if rate_limited(("login", client_ip()), 5, 900):
+            abort(429, "Слишком много попыток входа. Подождите 15 минут.")
+        if hmac.compare_digest(request.form.get("password", ""), ADMIN_PASSWORD):
+            session.clear()
+            session["admin"] = True
+            session.permanent = True
+            audit("вход в админку")
+            nxt = request.args.get("next", "")
+            return redirect(nxt if nxt.startswith("/admin") else url_for("admin_list"))
+        audit("неудачный вход")
+        err = "Неверный пароль."
+    return render_template("login.html", err=err)
+
+
+@app.route("/admin/logout", methods=["POST"])
+@admin_required
+def admin_logout():
+    check_csrf()
+    session.clear()
+    return redirect(url_for("admin_login"))
+
+
+@app.route("/admin")
+@admin_required
+def admin_list():
+    rows = db().execute(
+        "SELECT c.*, (SELECT COUNT(*) FROM files f WHERE f.claim_id=c.id) AS nfiles "
+        "FROM claims c ORDER BY c.id"
+    ).fetchall()
+    total_paid = sum(r["paid_amount"] or 0 for r in rows)
+    total_damage = sum(r["damage"] or 0 for r in rows)
+    dup = defaultdict(int)
+    for r in rows:
+        dup[r["iin"]] += 1
+    return render_template("admin_list.html", rows=rows, total_paid=total_paid,
+                           total_damage=total_damage, dup=dup)
+
+
+@app.route("/admin/claim/<int:cid>", methods=["GET", "POST"])
+@admin_required
+def admin_claim(cid):
+    c = db().execute("SELECT * FROM claims WHERE id=?", (cid,)).fetchone()
+    if not c:
+        abort(404)
+    if request.method == "POST":
+        check_csrf()
+        db().execute("UPDATE claims SET status=?, admin_note=? WHERE id=?",
+                     (request.form.get("status", "новая")[:40], request.form.get("admin_note", "")[:5000], cid))
+        db().commit()
+        flash("Сохранено.")
+        return redirect(url_for("admin_claim", cid=cid))
+    files = db().execute("SELECT * FROM files WHERE claim_id=? ORDER BY category, id", (cid,)).fetchall()
+    audit(f"просмотр заявки {c['ref']}")
+    return render_template("admin_claim.html", c=c, files=files, cat_label=CAT_LABEL,
+                           statuses=["новая", "проверена", "нужны документы", "подписал заявление",
+                                     "признан потерпевшим", "иск подан", "отозвал согласие"])
+
+
+@app.route("/admin/file/<int:fid>")
+@admin_required
+def admin_file(fid):
+    f = db().execute("SELECT * FROM files WHERE id=?", (fid,)).fetchone()
+    if not f:
+        abort(404)
+    path = UPLOAD_DIR / str(f["claim_id"]) / f["stored_name"]
+    if not path.is_file():
+        abort(404)
+    return send_file(path, as_attachment=True, download_name=f["original_name"])
+
+
+@app.route("/admin/claim/<int:cid>/delete", methods=["POST"])
+@admin_required
+def admin_delete(cid):
+    check_csrf()
+    c = db().execute("SELECT ref FROM claims WHERE id=?", (cid,)).fetchone()
+    if not c:
+        abort(404)
+    for f in db().execute("SELECT stored_name FROM files WHERE claim_id=?", (cid,)):
+        p = UPLOAD_DIR / str(cid) / f["stored_name"]
+        if p.exists():
+            p.unlink()
+    d = UPLOAD_DIR / str(cid)
+    if d.exists() and not any(d.iterdir()):
+        d.rmdir()
+    db().execute("DELETE FROM files WHERE claim_id=?", (cid,))
+    db().execute("DELETE FROM claims WHERE id=?", (cid,))
+    db().commit()
+    audit(f"удалена заявка {c['ref']}")
+    flash(f"Заявка {c['ref']} и её файлы удалены.")
+    return redirect(url_for("admin_list"))
+
+
+CSV_COLS = [
+    ("ref", "Номер"), ("created_at", "Дата подачи"), ("full_name", "ФИО"), ("iin", "ИИН"),
+    ("birth_date", "Дата рождения"), ("phone", "Телефон"), ("email", "E-mail"), ("address", "Адрес"),
+    ("order_date", "Дата заказа"), ("item", "Что заказывали"), ("contract_price", "Цена по договору, тг"),
+    ("paid_amount", "Оплачено, тг"), ("payment_dates", "Даты оплат"), ("payment_method", "Способ оплаты"),
+    ("promised_date", "Обещанный срок"), ("received_value", "Стоимость полученного, тг"),
+    ("received_desc", "Что получено"), ("damage", "Ущерб, тг"), ("contact_channel", "Канал связи с ИП"),
+    ("last_contact", "Последний контакт"), ("claim_sent", "Претензия"), ("police_filed", "Уже обращался в полицию"),
+    ("story", "Описание"), ("status", "Статус"), ("admin_note", "Заметка"), ("nfiles", "Файлов"),
+]
+
+
+def csv_val(v):
+    if v is None:
+        return ""
+    if isinstance(v, float):
+        return str(int(v)) if v.is_integer() else f"{v:.2f}".replace(".", ",")
+    return v
+
+
+def build_csv(rows):
+    buf = io.StringIO()
+    buf.write("﻿")  # BOM, чтобы Excel правильно открыл кириллицу
+    w = csv.writer(buf, delimiter=";")
+    w.writerow([h for _, h in CSV_COLS])
+    for r in rows:
+        w.writerow([csv_val(r[k]) for k, _ in CSV_COLS])
+    w.writerow([])
+    w.writerow(["ИТОГО", "", "", "", "", "", "", "", "", "", "",
+                csv_val(float(sum(r["paid_amount"] or 0 for r in rows))), "", "", "", "", "",
+                csv_val(float(sum(r["damage"] or 0 for r in rows)))])
+    return buf.getvalue()
+
+
+def all_rows():
+    return db().execute(
+        "SELECT c.*, (SELECT COUNT(*) FROM files f WHERE f.claim_id=c.id) AS nfiles FROM claims c ORDER BY c.id"
+    ).fetchall()
+
+
+@app.route("/admin/export.csv")
+@admin_required
+def export_csv():
+    audit("экспорт CSV")
+    data = build_csv(all_rows())
+    return Response(data, mimetype="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f"attachment; filename=prestige_{datetime.now():%Y%m%d}.csv"})
+
+
+def safe_dir_name(s):
+    s = re.sub(r"[^\w\-. ]+", "", s, flags=re.UNICODE).strip().replace(" ", "_")
+    return s[:60] or "noname"
+
+
+@app.route("/admin/export.zip")
+@admin_required
+def export_zip():
+    audit("экспорт ZIP")
+    rows = all_rows()
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("svodnaya_tablica.csv", build_csv(rows))
+        for i, r in enumerate(rows, 1):
+            folder = f"{i:02d}_{safe_dir_name(r['full_name'])}_{r['ref']}"
+            card = {k: r[k] for k in r.keys() if k not in ("ip",)}
+            z.writestr(f"{folder}/anketa.json", json.dumps(card, ensure_ascii=False, indent=2))
+            z.writestr(f"{folder}/anketa.txt", "\n".join(
+                f"{h}: {'' if r[k] is None else r[k]}" for k, h in CSV_COLS) + f"\n\nТекст согласия:\n{r['consent_text']}\n")
+            for f in db().execute("SELECT * FROM files WHERE claim_id=?", (r["id"],)):
+                p = UPLOAD_DIR / str(r["id"]) / f["stored_name"]
+                if p.is_file():
+                    orig = safe_dir_name(f["original_name"]) or f["stored_name"]
+                    z.write(p, f"{folder}/{f['category']}_{f['id']}_{orig}")
+    mem.seek(0)
+    return send_file(mem, mimetype="application/zip", as_attachment=True,
+                     download_name=f"prestige_all_{datetime.now():%Y%m%d}.zip")
+
+
+@app.route("/admin/audit")
+@admin_required
+def admin_audit():
+    rows = db().execute("SELECT * FROM audit ORDER BY id DESC LIMIT 300").fetchall()
+    return render_template("admin_audit.html", rows=rows)
+
+
+@app.template_filter("tg")
+def tg(v):
+    if v is None or v == "":
+        return "—"
+    return f"{v:,.0f}".replace(",", " ") + " ₸"
+
+
+init_storage()
+
+if __name__ == "__main__":
+    app.run(host=os.environ.get("HOST", "127.0.0.1"), port=int(os.environ.get("PORT", "8000")))
